@@ -1,0 +1,5 @@
+{
+    "coordinator_url": "ws://localhost:8000/agent",
+    "agent_token": "agt_0sUMzoGaLueO7n731W7LMQM2U5BlMy-neT1KR9MTG1Y",
+    "allow_on_battery": true
+}

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log in · Mobiusphere</title>
+<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<script>
+  // Same theme choice as the dashboard (shared key), applied before paint.
+  (function () {
+    let theme = null;
+    try { theme = localStorage.getItem("mobiusphere-theme"); } catch (e) {}
+    if (theme !== "light" && theme !== "dark") theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<style>
+  :root, :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0B0B0C; --side: #111113; --panel: #18181B; --panel-2: #1F1F23; --raise: #2A2A2F;
+    --rule: #2A2A2E; --rule-2: #3B3B41; --ink: #EDEDEF; --muted: #A1A1AA; --faint: #71717A;
+    --accent: #F97316; --accent-strong: #FB8A3C; --accent-ink: #FDBA74; --on-accent: #1C0D02;
+    --ok: #22C38E; --warn: #EAB308; --err: #F05C70; --focus: #FB923C;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #F4F4F5; --side: #FFFFFF; --panel: #FFFFFF; --panel-2: #F7F7F8; --raise: #E7E7EA;
+    --rule: #E4E4E7; --rule-2: #D4D4D8; --ink: #18181B; --muted: #5B5B63; --faint: #8B8B93;
+    --accent: #EA580C; --accent-strong: #C2410C; --accent-ink: #C2410C; --on-accent: #FFFFFF;
+    --ok: #15965F; --warn: #B7880A; --err: #D93A4E; --focus: #EA580C;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; }
+  body { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--ink);
+         font: 14px/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .i { width: 18px; height: 18px; flex: none; }
+
+  /* top bar — same as the dashboard */
+  .topbar { display: flex; align-items: center; gap: 14px; height: 64px; padding: 0 28px 0 19px;
+            background: color-mix(in srgb, var(--bg) 90%, transparent); border-bottom: 1px solid var(--rule); }
+  .brand { display: flex; align-items: center; gap: 12px; color: var(--ink); text-decoration: none; }
+  .logo { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 9px; color: #fff;
+          background: linear-gradient(135deg, #FB923C, #C2410C); }
+  .brand-text { display: grid; line-height: 1.25; }
+  .brand-name { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
+  .brand-tag { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .top-tools { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+  /* sign-in card */
+  .content { flex: 1; display: grid; place-items: center; padding: 40px 20px; }
+  .card { width: min(420px, 100%); padding: 30px 28px 26px; background: var(--panel); border: 1px solid var(--rule);
+          border-radius: 14px; box-shadow: 0 1px 2px rgb(0 0 0 / .06); }
+  .card-head { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
+  .title-icon { width: 46px; height: 46px; flex: none; display: grid; place-items: center; border-radius: 12px; color: var(--accent-ink);
+          background: color-mix(in srgb, var(--accent) 16%, var(--panel)); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--rule)); }
+  .title-icon .i { width: 22px; height: 22px; }
+  h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
+  .sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  form { display: grid; gap: 14px; }
+  form > p { margin: 0; color: var(--muted); }
+  label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
+  input { width: 100%; min-height: 40px; padding: 8px 12px; font: inherit; color: var(--ink); background: var(--panel-2);
+          border: 1px solid var(--rule-2); border-radius: 8px; }
+  input:focus { border-color: var(--focus); outline: none; }
+  button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 40px; padding: 0 14px;
+          font: inherit; font-weight: 600; border-radius: 8px; cursor: pointer; }
+  .primary { color: var(--on-accent); background: var(--accent); border: 1px solid var(--accent); }
+  .primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+  .primary:disabled { opacity: .6; cursor: default; }
+  .icon-btn { width: 34px; height: 34px; padding: 0; color: var(--muted); background: var(--panel-2); border: 1px solid var(--rule-2); font-weight: 400; }
+  .icon-btn:hover { color: var(--ink); border-color: var(--muted); }
+  .msg { min-height: 1.5em; margin: 0; font-size: 13px; }
+  .msg.error { color: var(--err); }
+  .msg.ok { color: var(--ok); }
+  .links { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+  a.link { color: var(--accent-ink); text-decoration: none; }
+  a.link:hover { text-decoration: underline; }
+
+  .statusbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; padding: 10px 28px;
+          border-top: 1px solid var(--rule); background: var(--side); color: var(--muted); font-size: 12.5px; }
+  .statusbar span { display: inline-flex; align-items: center; gap: 7px; }
+  .statusbar .i { width: 15px; height: 15px; }
+  .statusbar .ok { color: var(--ok); } .statusbar .warn { color: var(--warn); }
+  .statusbar .clock { margin-left: auto; }
+
+  @media (max-width: 640px) {
+    .topbar, .statusbar { padding-left: 16px; padding-right: 16px; }
+    .brand-tag { display: none; }
+    .card { padding: 24px 20px; }
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <span class="brand">
+    <span class="logo"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12c0-2.2 3.8-4 8.5-4s8.5 1.8 8.5 4-3.8 4-8.5 4-8.5-1.8-8.5-4z"/><path d="M12 3.5c2 2.3 3 5.1 3 8.5s-1 6.2-3 8.5"/></svg></span>
+    <span class="brand-text"><span class="brand-name">Mobiusphere</span><span class="brand-tag">Integrated proxy management ecosystem</span></span>
+  </span>
+  <div class="top-tools">
+    <button type="button" class="icon-btn" id="theme-toggle" aria-label="Switch to light theme" title="Switch to light theme"></button>
+  </div>
+</header>
+
+<main class="content">
+  <div class="card">
+    <div class="card-head">
+      <span class="title-icon"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span>
+      <div><h1 id="card-title">Log in</h1><p class="sub" id="card-sub">Sign in to manage your machines and tokens</p></div>
+    </div>
+
+    <form id="login-form">
+      <label>Username<input name="username" autocomplete="username" required autofocus maxlength="64"></label>
+      <label>Password<input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
+      <button type="submit" class="primary">Log in</button>
+      <p id="error" class="msg error" role="alert"></p>
+      <div class="links"><a href="#" class="link" id="forgot-link">Forgot password?</a></div>
+    </form>
+
+    <form id="forgot-form" hidden>
+      <p>Enter the email address linked to your account. If it matches, we’ll email a reset link.</p>
+      <label>Email<input name="email" type="email" autocomplete="email" required maxlength="254"></label>
+      <button type="submit" class="primary">Send reset link</button>
+      <p id="forgot-message" class="msg" role="status"></p>
+      <div class="links"><a href="#" class="link back-to-login">Back to log in</a></div>
+    </form>
+
+    <form id="reset-form" hidden>
+      <p>Choose a new password (at least 12 characters).</p>
+      <input name="token" type="hidden">
+      <label>New password<input name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="256"></label>
+      <label>Confirm password<input name="password_confirm" type="password" autocomplete="new-password" required minlength="12" maxlength="256"></label>
+      <button type="submit" class="primary">Reset password</button>
+      <p id="reset-message" class="msg error" role="alert"></p>
+      <div class="links"><a href="/login" class="link">Back to log in</a></div>
+    </form>
+  </div>
+</main>
+
+<footer class="statusbar">
+  <span id="sb-secure"></span>
+  <span class="clock" id="sb-clock"></span>
+</footer>
+
+<script>
+const ICONS = {
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5v.5"/>',
+};
+const icon = name => `<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+
+/* theme toggle (shares its saved choice with the dashboard) */
+function syncThemeToggle() {
+  const light = document.documentElement.dataset.theme === "light";
+  const btn = document.getElementById("theme-toggle"), label = `Switch to ${light ? "dark" : "light"} theme`;
+  btn.innerHTML = icon(light ? "moon" : "sun");
+  btn.setAttribute("aria-label", label);
+  btn.title = label;
+}
+document.getElementById("theme-toggle").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("mobiusphere-theme", next); } catch {}
+  syncThemeToggle();
+});
+syncThemeToggle();
+
+/* status bar */
+document.getElementById("sb-secure").innerHTML = location.protocol === "https:"
+  ? `<span class="ok">${icon("lock")}</span>Secure connection (HTTPS)`
+  : `<span class="warn">${icon("alert")}</span>Connection not encrypted (HTTP)`;
+const tick = () => {
+  document.getElementById("sb-clock").textContent = new Date().toLocaleString(undefined,
+    { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short", year: "numeric" });
+};
+tick();
+setInterval(tick, 1000);
+
+/* forms — same behaviour and endpoints as before */
+const loginForm = document.getElementById("login-form");
+const forgotForm = document.getElementById("forgot-form");
+const resetForm = document.getElementById("reset-form");
+const HEADINGS = new Map([
+  [loginForm, ["Log in", "Sign in to manage your machines and tokens"]],
+  [forgotForm, ["Reset your password", "We’ll email you a link to choose a new one"]],
+  [resetForm, ["Choose a new password", "Use at least 12 characters"]],
+]);
+const showForm = form => {
+  for (const candidate of [loginForm, forgotForm, resetForm]) candidate.hidden = candidate !== form;
+  const [title, sub] = HEADINGS.get(form);
+  document.getElementById("card-title").textContent = title;
+  document.getElementById("card-sub").textContent = sub;
+  document.title = `${title} · Mobiusphere`;
+  form.querySelector("input:not([type=hidden])")?.focus();
+};
+const resetToken = new URLSearchParams(location.hash.slice(1)).get("reset");
+if (resetToken) {
+  resetForm.elements.token.value = resetToken;
+  showForm(resetForm);
+  history.replaceState(null, "", "/login");
+}
+document.getElementById("forgot-link").addEventListener("click", event => {
+  event.preventDefault();
+  showForm(forgotForm);
+});
+document.querySelector(".back-to-login").addEventListener("click", event => {
+  event.preventDefault();
+  showForm(loginForm);
+});
+
+async function postJson(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    credentials: "same-origin",
+  });
+  let result = {};
+  try { result = await response.json(); } catch {}
+  if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+  return result;
+}
+async function busy(form, task) {
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  try { await task(); } finally { button.disabled = false; }
+}
+
+loginForm.addEventListener("submit", event => {
+  event.preventDefault();
+  const error = document.getElementById("error");
+  error.textContent = "";
+  busy(loginForm, async () => {
+    try {
+      await postJson("/login", Object.fromEntries(new FormData(loginForm)));
+      location.assign("/dashboard");
+    } catch (e) {
+      error.textContent = e.message || "Unable to log in.";
+    }
+  });
+});
+
+forgotForm.addEventListener("submit", event => {
+  event.preventDefault();
+  const message = document.getElementById("forgot-message");
+  message.textContent = "";
+  message.className = "msg";
+  busy(forgotForm, async () => {
+    try {
+      const result = await postJson("/forgot-password", Object.fromEntries(new FormData(forgotForm)));
+      message.textContent = result.message;
+      message.className = "msg ok";
+    } catch (e) {
+      message.textContent = e.message || "Unable to request a password reset.";
+      message.className = "msg error";
+    }
+  });
+});
+
+resetForm.addEventListener("submit", event => {
+  event.preventDefault();
+  const message = document.getElementById("reset-message");
+  message.textContent = "";
+  const values = Object.fromEntries(new FormData(resetForm));
+  if (values.password !== values.password_confirm) {
+    message.textContent = "Passwords do not match.";
+    return;
+  }
+  busy(resetForm, async () => {
+    try {
+      await postJson("/reset-password", { token: values.token, password: values.password });
+      location.assign("/login");
+    } catch (e) {
+      message.textContent = e.message || "Unable to reset the password.";
+    }
+  });
+});
+</script>
+</body>
+</html>
