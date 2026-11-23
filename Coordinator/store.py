@@ -18,7 +18,8 @@ from cryptography.fernet import Fernet, InvalidToken
 import base64
 
 DB_PATH = os.getenv("COORD_DB", "coordinator.db")
-TOKEN_ENCRYPTION_KEY_ENV = "COORD_TOKEN_ENCRYPTION_KEY"
+# Name of the environment variable, not a secret value.
+TOKEN_ENCRYPTION_KEY_ENV = "COORD_TOKEN_ENCRYPTION_KEY"  # nosec B105
 # Daily /fetch limit given to every new user token. Admins can change it per token afterwards.
 DEFAULT_DAILY_FETCH_LIMIT = int(os.getenv("DEFAULT_DAILY_FETCH_LIMIT", "100"))
 _TOKEN_KEY_CHECK = b"distributed-crawler-token-key-check-v1"
@@ -124,6 +125,69 @@ CREATE INDEX IF NOT EXISTS ix_usage_logs_user_ts ON usage_logs(username, ts);
 CREATE INDEX IF NOT EXISTS ix_usage_logs_url ON usage_logs(url);
 """
 
+# --------------------------------------------------------------------------- migrations
+# Complete, constant DDL statements keyed by column name. Nothing is interpolated into
+# SQL at runtime, so no variable data can ever reach an ALTER TABLE statement.
+_USAGE_LOG_MIGRATIONS = (
+    ("service", "ALTER TABLE usage_logs ADD COLUMN service TEXT NOT NULL DEFAULT 'unknown'"),
+    ("domain", "ALTER TABLE usage_logs ADD COLUMN domain TEXT NOT NULL DEFAULT ''"),
+)
+_CLIENT_MIGRATIONS = (
+    ("owner", "ALTER TABLE clients ADD COLUMN owner TEXT"),
+    ("location", "ALTER TABLE clients ADD COLUMN location TEXT"),
+    ("encrypted_token", "ALTER TABLE clients ADD COLUMN encrypted_token TEXT"),
+    # per-token daily /fetch limit; usage_count belongs to usage_day and resets lazily.
+    # DEFAULT_DAILY_FETCH_LIMIT is already an int; int() keeps that guaranteed.
+    ("daily_limit", ("ALTER TABLE clients ADD COLUMN daily_limit "
+                    f"INTEGER NOT NULL DEFAULT {int(DEFAULT_DAILY_FETCH_LIMIT)}")),
+    ("usage_day", "ALTER TABLE clients ADD COLUMN usage_day TEXT"),
+    ("usage_count", "ALTER TABLE clients ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0"),
+)
+
+# --------------------------------------------------------------------------- query templates
+# Constant templates. The only runtime substitutions are (a) a WHERE clause assembled
+# from fixed literals by Store._usage_where(), and (b) an UPDATE column list checked
+# against _AGENT_UPDATABLE_FIELDS. All values are always bound with "?".
+_USAGE_LIST_SQL = {
+    "ASC": ("SELECT id,ts,username,client_id,url,method,success,status_code,agent_id,"
+            "duration_sec,error,service,domain FROM usage_logs {where} "
+            "ORDER BY ts ASC,id ASC LIMIT ? OFFSET ?"),
+    "DESC": ("SELECT id,ts,username,client_id,url,method,success,status_code,agent_id,"
+             "duration_sec,error,service,domain FROM usage_logs {where} "
+             "ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?"),
+}
+_USAGE_COUNT_SQL = "SELECT COUNT(*) AS n FROM usage_logs {where}"
+_USAGE_TOTALS_SQL = (
+    "SELECT COUNT(*) AS requests,COALESCE(SUM(success),0) AS succeeded,"
+    "COUNT(*)-COALESCE(SUM(success),0) AS failed,COUNT(DISTINCT url) AS unique_urls "
+    "FROM usage_logs {where}"
+)
+_USAGE_DAYS_SQL = (
+    "SELECT date(ts,'unixepoch') AS date,username,service,domain,COUNT(*) AS requests,"
+    "COALESCE(SUM(success),0) AS succeeded,"
+    "COUNT(*)-COALESCE(SUM(success),0) AS failed,COUNT(DISTINCT url) AS unique_urls "
+    "FROM usage_logs {where} GROUP BY date(ts,'unixepoch'),username,service,domain "
+    "ORDER BY date DESC,username,service,domain"
+)
+_TOUCH_AGENT_SQL = "UPDATE agents SET {cols} WHERE agent_id=?"
+
+# Agent columns touch_agent() may set. Anything else is rejected, so caller-supplied
+# keyword names can never become SQL. Trim/extend to match what your callers really use.
+_AGENT_UPDATABLE_FIELDS = frozenset({
+    "label", "owner", "enabled", "last_connected", "last_disconnected", "last_seen",
+    "egress_ip", "platform", "agent_version", "jobs_ok", "jobs_failed",
+})
+
+
+def _fill(template: str, placeholder: str, fragment: str) -> str:
+    """Insert a trusted, code-generated SQL fragment into a constant template.
+
+    `template` is always one of the module-level constants above and `fragment` is only
+    ever built from fixed literals or allowlisted column names (never from request data).
+    This is the single place where SQL text is composed.
+    """
+    return template.replace(placeholder, fragment)  # nosec B608
+
 
 # --------------------------------------------------------------------------- hashing
 def token_hash(token: str) -> str:
@@ -192,19 +256,13 @@ class Store:
             "WHERE email IS NOT NULL"
         )
         usage_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(usage_logs)")}
-        for column, definition in (
-                ("service", "TEXT NOT NULL DEFAULT 'unknown'"),
-                ("domain", "TEXT NOT NULL DEFAULT ''")):
+        for column, ddl in _USAGE_LOG_MIGRATIONS:
             if column not in usage_columns:
-                self.db.execute(f"ALTER TABLE usage_logs ADD COLUMN {column} {definition}")
+                self.db.execute(ddl)
         client_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(clients)")}
-        for column, definition in (
-                ("owner", "TEXT"), ("location", "TEXT"), ("encrypted_token", "TEXT"),
-                # per-token daily /fetch limit; usage_count belongs to usage_day and resets lazily
-                ("daily_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_DAILY_FETCH_LIMIT}"),
-                ("usage_day", "TEXT"), ("usage_count", "INTEGER NOT NULL DEFAULT 0")):
+        for column, ddl in _CLIENT_MIGRATIONS:
             if column not in client_columns:
-                self.db.execute(f"ALTER TABLE clients ADD COLUMN {column} {definition}")
+                self.db.execute(ddl)
         self.db.execute("UPDATE clients SET enabled=0 WHERE owner IS NULL")
         key_check = self.db.execute(
             "SELECT value FROM settings WHERE key='token_encryption_key_check'"
@@ -243,8 +301,9 @@ class Store:
         return rows[0] if rows else None
 
     # ---- agents
-    def add_agent(self, agent_id: str, label: str = "", owner: str = "", token: str = "") -> str:
-        if token=="" or token is None:
+    def add_agent(self, agent_id: str, label: str = "", owner: str = "",
+                  token: Optional[str] = None) -> str:
+        if not token:  # None or empty -> generate a fresh token
             tok = new_token("agt")
         else:
             tok = token
@@ -305,12 +364,15 @@ class Store:
     def touch_agent(self, agent_id: str, **fields):
         if not fields:
             return
-        cols = ",".join(f"{k}=?" for k in fields)
-        self.x(f"UPDATE agents SET {cols} WHERE agent_id=?", (*fields.values(), agent_id))
+        unknown = set(fields) - _AGENT_UPDATABLE_FIELDS
+        if unknown:
+            raise ValueError(f"Unsupported agent field(s): {', '.join(sorted(unknown))}")
+        cols = ",".join(k + "=?" for k in fields)
+        self.x(_fill(_TOUCH_AGENT_SQL, "{cols}", cols), (*fields.values(), agent_id))
 
     def count_job(self, agent_id: str, ok: bool):
-        col = "jobs_ok" if ok else "jobs_failed"
-        self.x(f"UPDATE agents SET {col}={col}+1 WHERE agent_id=?", (agent_id,))
+        self.x("UPDATE agents SET jobs_ok=jobs_ok+?, jobs_failed=jobs_failed+? WHERE agent_id=?",
+               (1 if ok else 0, 0 if ok else 1, agent_id))
 
     # ---- API clients (scrapers)
     def add_user(self, username: str, email: str, password: str):
@@ -608,7 +670,7 @@ class Store:
         if client_id:
             clauses.append("client_id=?")
             args.append(client_id.strip())
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
         return where, args
 
     def _usage_log_where(self, username, start_ts, end_ts, domain, service, agent_id, result,
@@ -638,13 +700,8 @@ class Store:
             status_code, client_id, max_id=max_id
         )
         args.extend([int(limit), max(0, int(offset))])
-        direction = "ASC" if sort_order == "asc" else "DESC"
-        return self.q(
-            "SELECT id,ts,username,client_id,url,method,success,status_code,agent_id,"
-            f"duration_sec,error,service,domain FROM usage_logs {where} "
-            f"ORDER BY ts {direction},id {direction} LIMIT ? OFFSET ?",
-            args
-        )
+        template = _USAGE_LIST_SQL["ASC" if sort_order == "asc" else "DESC"]
+        return self.q(_fill(template, "{where}", where), args)
 
     def count_usage_logs(self, username: Optional[str], start_ts: Optional[float],
                          end_ts: Optional[float], domain: Optional[str] = None,
@@ -656,7 +713,7 @@ class Store:
             username, start_ts, end_ts, domain, service, agent_id, result,
             status_code, client_id, min_id=min_id, max_id=max_id
         )
-        row = self.one(f"SELECT COUNT(*) AS n FROM usage_logs {where}", args)
+        row = self.one(_fill(_USAGE_COUNT_SQL, "{where}", where), args)
         return int(row["n"]) if row else 0
 
     def max_usage_log_id(self) -> int:
@@ -672,20 +729,8 @@ class Store:
             username, start_ts, end_ts, domain, service, agent_id, result,
             status_code, client_id
         )
-        totals = self.one(
-            "SELECT COUNT(*) AS requests,COALESCE(SUM(success),0) AS succeeded,"
-            "COUNT(*)-COALESCE(SUM(success),0) AS failed,COUNT(DISTINCT url) AS unique_urls "
-            f"FROM usage_logs {where}",
-            args
-        )
-        days = self.q(
-            "SELECT date(ts,'unixepoch') AS date,username,service,domain,COUNT(*) AS requests,"
-            "COALESCE(SUM(success),0) AS succeeded,"
-            "COUNT(*)-COALESCE(SUM(success),0) AS failed,COUNT(DISTINCT url) AS unique_urls "
-            f"FROM usage_logs {where} GROUP BY date(ts,'unixepoch'),username,service,domain "
-            "ORDER BY date DESC,username,service,domain",
-            args
-        )
+        totals = self.one(_fill(_USAGE_TOTALS_SQL, "{where}", where), args)
+        days = self.q(_fill(_USAGE_DAYS_SQL, "{where}", where), args)
         return {"totals": totals, "days": days}
 
     def list_clients(self) -> list:
