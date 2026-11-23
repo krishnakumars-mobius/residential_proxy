@@ -107,6 +107,7 @@ def _setup_logging() -> logging.Logger:
 
 
 log = _setup_logging()
+_JITTER = random.SystemRandom()   # reconnect jitter, drawn from the OS CSPRNG
 
 
 def acquire_single_instance_lock():
@@ -397,8 +398,7 @@ def _requests_scrape_sync(job: dict, session=None) -> dict:
                          stream=True, allow_redirects=True, **body)
         ip = _requests_peer_ip(resp)                 # grab before the body is consumed
         ctype = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        is_text = is_text_type(ctype)
-        
+
         chunks, size, truncated = [], 0, False
         for chunk in resp.iter_content(chunk_size=65536):
             chunks.append(chunk)
@@ -442,8 +442,8 @@ def _selenium_document_response(driver):
                 headers = {k.lower(): v for k, v in (r.get("headers") or {}).items()}
                 ctype = (headers.get("content-type") or r.get("mimeType") or "")
                 ctype = ctype.split(";")[0].strip().lower() or None
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("could not read selenium performance log: %s: %s", type(exc).__name__, exc)
     return status, ip, ctype, request_info
 
 
@@ -476,8 +476,9 @@ def _selenium_scrape_sync(job: dict) -> dict:
         driver.set_page_load_timeout(timeout)
         try:
             driver.get(url)
-        except Exception:
-            pass  # a download can make driver.get error out; the log still has the response
+        except Exception as exc:
+            # a download can make driver.get error out; the log still has the response
+            log.debug("driver.get raised (expected for downloads): %s: %s", type(exc).__name__, exc)
         if job.get("wait_seconds"):
             time.sleep(job["wait_seconds"])
 
@@ -587,8 +588,8 @@ class Renderer:
             try:
                 if self._browser:
                     await self._browser.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("error closing browser during reset: %s: %s", type(exc).__name__, exc)
             self._browser = None
 
     async def _route(self, route):
@@ -762,8 +763,8 @@ class Renderer:
             if browser:
                 try:
                     browser.stop()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("error stopping browser: %s: %s", type(exc).__name__, exc)
             shutil.rmtree(download_dir, ignore_errors=True)
 
 
@@ -881,8 +882,8 @@ async def heartbeat(ws, send_lock, session, stats):
             try:
                 txt = (await session.get(EGRESS_CHECK_URL, timeout=10)).text.strip()
                 egress_ip = str(ipaddress.ip_address(txt))
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("egress IP check failed: %s: %s", type(exc).__name__, exc)
             last_check = now
         reason = pause_reason(stats)
         async with send_lock:
@@ -953,7 +954,7 @@ async def main():
                 log.warning("connection closed (code %s)", code)
             except Exception as e:
                 log.warning("connection failed: %s: %s", type(e).__name__, e)
-            delay = backoff + random.uniform(0, backoff / 2)
+            delay = backoff + _JITTER.uniform(0, backoff / 2)
             log.info("reconnecting in %.1fs", delay)
             await asyncio.sleep(delay)
             backoff = min(backoff * 2, 30)

@@ -43,7 +43,6 @@ Put Caddy/nginx in front for TLS (https:// and wss://). Never expose plain http 
 Passwords, session cookies, and bearer tokens must only travel over TLS.
 """
 import asyncio
-import base64
 import csv
 import io
 import ipaddress
@@ -56,7 +55,6 @@ import sqlite3
 import ssl
 import time
 import uuid
-import zlib
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -339,8 +337,8 @@ class Registry:
             _fail_pending(old, "agent reconnected")
             try:
                 await old.ws.close(code=4409)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("could not close superseded socket for %s: %s", agent.agent_id, exc)
 
     async def remove(self, agent: LiveAgent) -> bool:
         async with self.lock:
@@ -453,8 +451,8 @@ async def sweeper():
                     await _delete_agent_sessions(a.agent_id, "agent disabled")
                     try:
                         await a.ws.close(code=4403)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("could not close socket for disabled agent %s: %s", a.agent_id, exc)
                     continue
                 if office_networks.contains(a.egress_ip):
                     await _delete_agent_sessions(a.agent_id, "agent on a blacklisted network")
@@ -1261,7 +1259,7 @@ def forgot_password(body: ForgotPassword, request: Request):
     try:
         mail_settings = _password_reset_mail_settings()
     except RuntimeError as exc:
-        log.error("password reset email is unavailable: %s", exc)
+        log.error("reset-link email is unavailable: %s", exc)
         raise HTTPException(503, "password reset email is not configured") from exc
 
     account = store.user_by_email(body.email)
@@ -1273,7 +1271,7 @@ def forgot_password(body: ForgotPassword, request: Request):
                 _send_password_reset_email(account["email"], token, mail_settings)
             except (OSError, RuntimeError, smtplib.SMTPException, ValueError) as exc:
                 store.delete_password_reset(token)
-                log.error("password reset email delivery failed (%s)", type(exc).__name__)
+                log.error("reset-link email delivery failed (%s)", type(exc).__name__)
                 raise HTTPException(503, "password reset email could not be sent") from exc
     return {"ok": True, "message": "If that account exists, a reset link has been sent."}
 
@@ -1334,8 +1332,8 @@ async def api_agent_action(agent_id: str, action: str, user: str = Depends(requi
     if action == "disable" and live:
         try:
             await live.ws.close(code=4403)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("could not close socket for disabled agent %s: %s", agent_id, exc)
     return {"ok": True}
 
 
